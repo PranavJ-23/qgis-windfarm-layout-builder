@@ -181,20 +181,6 @@ class PackEllipseThread(QThread):
         )
         self.finished_signal.emit(ellipses)
 
-class FetchWindThread(QThread):
-    progress_signal = pyqtSignal(int)
-    finished_signal = pyqtSignal(list)
-
-    def __init__(self, coords):
-        super().__init__()
-        self.coords = coords
-
-    def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        results = loop.run_until_complete(fetch_all_coords_list(self.coords))
-        self.finished_signal.emit(results)
-
 # -------------------- Plugin Dialog -------------------- #
 class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
     def __init__(self, parent=None):
@@ -210,70 +196,58 @@ class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
         self.genrate_layout_btn.clicked.connect(self.on_generate_layout)
         self.plot_wind_btn.clicked.connect(self.on_plot_wind_rose)
 
-from qgis.core import QgsCoordinateTransform, QgsProject, QgsCoordinateReferenceSystem
+    def on_init_wind_data(self):
+        # Fetch coordinates
+        if self.use_point_layer_chk.isChecked():
+            layer = self.coord_layer_combo.currentLayer()
+            if not layer:
+                QtWidgets.QMessageBox.warning(self, "No Layer", "Please select a point layer")
+                return
 
-from qgis.core import QgsCoordinateTransform, QgsProject, QgsCoordinateReferenceSystem
+            from qgis.core import QgsCoordinateTransform, QgsProject, QgsCoordinateReferenceSystem
 
-def on_init_wind_data(self):
-    """
-    Fetch coordinates from the GUI (either from a point layer or manual input),
-    transform to WGS84 if needed, and start fetching wind data in a thread.
-    """
+            # Transform layer CRS to WGS84
+            crs_src = layer.crs()
+            crs_dest = QgsCoordinateReferenceSystem("EPSG:4326")  # WGS84
+            transform = QgsCoordinateTransform(crs_src, crs_dest, QgsProject.instance().transformContext())
 
-    # --- Determine coordinates ---
-    coords = []  # local variable to avoid accidentally using old values
+            # Only a single feature expected
+            feature = next(layer.getFeatures(), None)
+            if not feature:
+                QtWidgets.QMessageBox.warning(self, "No Feature", "Layer has no features")
+                return
 
-    if self.use_point_layer_chk.isChecked():
-        layer = self.coord_layer_combo.currentLayer()
-        if not layer:
-            QtWidgets.QMessageBox.warning(self, "No Layer", "Please select a point layer")
+            geom = feature.geometry()
+            if geom.isEmpty():
+                QtWidgets.QMessageBox.warning(self, "No Geometry", "Point geometry is empty")
+                return
+
+            pt = geom.asPoint()
+            pt_wgs84 = transform.transform(pt)
+
+            # Store as (latitude, longitude)
+            self.coords = [(pt_wgs84.y(), pt_wgs84.x())]
+
+        else:
+            # Manual lat/lon input (unchanged)
+            lat_text = self.lat_input.text()
+            lon_text = self.lon_input.text()
+            if not lat_text or not lon_text:
+                QtWidgets.QMessageBox.warning(self, "No Input", "Enter lat/lon or select point layer")
+                return
+            self.coords = [(float(lat_text), float(lon_text))]
+
+        # --- Fetch wind data synchronously for now ---
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self.results = loop.run_until_complete(fetch_all_coords_list(self.coords))
+        if "error" in self.results[0]:
+            QtWidgets.QMessageBox.critical(self, "Error", self.results[0]["error"])
             return
+        self.main_dir = dominant_wind_direction(self.results[0]['time_series_wd'])
+        QtWidgets.QMessageBox.information(self, "Finished", "Wind data obtained and dominant wind direction calculated.")
 
-        # Transform CRS to WGS84 (EPSG:4326)
-        crs_src = layer.crs()
-        crs_dest = QgsCoordinateReferenceSystem("EPSG:4326")
-        transform = QgsCoordinateTransform(crs_src, crs_dest, QgsProject.instance().transformContext())
-
-        # Only one point expected
-        feature = next(layer.getFeatures(), None)
-        if feature is None:
-            QtWidgets.QMessageBox.warning(self, "No Feature", "Point layer has no features")
-            return
-
-        geom = feature.geometry()
-        if geom.isEmpty():
-            QtWidgets.QMessageBox.warning(self, "No Geometry", "Point geometry is empty")
-            return
-
-        pt = geom.asPoint()
-        pt_wgs84 = transform.transform(pt)  # Returns QgsPointXY in WGS84
-
-        lat, lon = pt_wgs84.y(), pt_wgs84.x()
-        coords = [(lat, lon)]  # store as a tuple
-        print(f"[DEBUG] Transformed point coordinates (WGS84): lat={lat}, lon={lon}")
-
-    else:
-        # Manual lat/lon input
-        try:
-            lat = float(self.lat_input.text())
-            lon = float(self.lon_input.text())
-            coords = [(lat, lon)]
-            print(f"[DEBUG] Manual input coordinates: lat={lat}, lon={lon}")
-        except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Invalid Input", "Please enter valid numeric lat/lon")
-            return
-
-    # --- Store in self.coords for reference ---
-    self.coords = coords
-
-    # --- Start wind data fetch in a thread ---
-    self.wind_thread = FetchWindThread(self.coords)
-    self.wind_thread.finished_signal.connect(self.on_wind_finished)
-    self.wind_thread.progress_signal.connect(lambda val: None)  # ignore progress for now
-    self.wind_thread.start()
-
-
-def on_generate_layout(self):
+    def on_generate_layout(self):
         # Load polygon
         layer = self.construction_layer_combo.currentLayer()
         if not layer:
@@ -297,7 +271,7 @@ def on_generate_layout(self):
         self.thread.finished_signal.connect(self.on_layout_finished)
         self.thread.start()
 
-def on_layout_finished(self, ellipses):
+    def on_layout_finished(self, ellipses):
         if not ellipses:
             QtWidgets.QMessageBox.warning(self, "Layout Failed", "No valid layout generated")
             return
@@ -318,7 +292,7 @@ def on_layout_finished(self, ellipses):
             msg += f"\nTurbine wakes saved to {ellipse_path}"
         QtWidgets.QMessageBox.information(self, "Saved", msg)
 
-def on_plot_wind_rose(self):
+    def on_plot_wind_rose(self):
         if not self.results:
             QtWidgets.QMessageBox.warning(self, "No Data", "Please fetch wind data first")
             return
