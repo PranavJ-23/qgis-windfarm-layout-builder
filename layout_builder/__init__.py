@@ -25,12 +25,7 @@
 
 
 # noinspection PyPep8Naming
-def classFactory(iface):  # pylint: disable=invalid-name
-    """Load WindFarmLayout class from file WindFarmLayout.
-
-    :param iface: A QGIS interface instance.
-    :type iface: QgsInterface
-    """
-    #
+def classFactory(iface):
     from .layout_builder import WindFarmLayout
     return WindFarmLayout(iface)
+
