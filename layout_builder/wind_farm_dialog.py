@@ -124,10 +124,10 @@ def get_smart_edge_points(poly, hex_points, edge_dist=5):
     edge_zone = poly_clean.difference(inner_buffer)
     return [p for p in hex_points if edge_zone.contains(p)]
 
-def pack_ellipses_from_points(poly, points, width, height, angle_deg, progress_callback=None):
-    ellipses=[]
-    idx=rtree.index.Index()
-    for i, pt in enumerate(points):
+def pack_ellipses_from_points(poly, points, width, height, angle_deg):
+    ellipses = []
+    idx = rtree.index.Index()
+    for pt in points:
         candidate = create_rotated_ellipse(pt.x, pt.y, width, height, angle_deg)
         cand_bounds = candidate.bounds
         possible_overlaps = list(idx.intersection(cand_bounds))
@@ -135,8 +135,6 @@ def pack_ellipses_from_points(poly, points, width, height, angle_deg, progress_c
         if not overlap:
             ellipses.append(candidate)
             idx.insert(len(ellipses)-1, cand_bounds)
-        if progress_callback and i % max(1,len(points)//50)==0:
-            progress_callback.emit(int(i/len(points)*100))
     return ellipses
 
 def multiple_iterations_edge_start_smart(poly, width, height, angle_deg, spacing, n_trials=10, edge_buffer=None, progress_callback=None):
@@ -145,21 +143,33 @@ def multiple_iterations_edge_start_smart(poly, width, height, angle_deg, spacing
     if edge_buffer is None:
         edge_buffer = spacing
     edge_points = get_smart_edge_points(poly_union, hex_points, edge_dist=edge_buffer)
-    best_ellipses=[]
-    best_count=0
+    
+    best_ellipses = []
+    best_count = 0
+    total_points = len(hex_points) * n_trials  # total number of points across all trials
+    points_processed = 0
+
     for i in range(n_trials):
-        if progress_callback:
-            progress_callback.emit(int(i/n_trials*100))
         start_point = random.choice(edge_points)
         start_idx = hex_points.index(start_point)
         trial_points = hex_points[start_idx:] + hex_points[:start_idx]
-        ellipses = pack_ellipses_from_points(poly_union, trial_points, width, height, angle_deg, progress_callback)
+        ellipses = pack_ellipses_from_points(poly_union, trial_points, width, height, angle_deg)
+        
+        # Update best
         if len(ellipses) > best_count:
             best_count = len(ellipses)
             best_ellipses = ellipses
+        
+        # Update points processed
+        points_processed += len(trial_points)
+        if progress_callback:
+            progress_callback.emit(int(points_processed / total_points * 100))
+            
+    # Ensure 100% at the end
     if progress_callback:
         progress_callback.emit(100)
     return best_ellipses
+
 
 # -------------------- Worker Thread -------------------- #
 class PackEllipseThread(QThread):
@@ -183,8 +193,9 @@ class PackEllipseThread(QThread):
 
 # -------------------- Plugin Dialog -------------------- #
 class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
-    def __init__(self, parent=None):
+    def __init__(self, iface=None, parent=None):
         super().__init__(parent)
+        self.iface = iface
         self.setupUi(self)
         self.results=[]
         self.main_dir=None
@@ -253,7 +264,23 @@ class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
         if not layer:
             QtWidgets.QMessageBox.warning(self, "No Layer", "Please select a polygon layer")
             return
-        self.poly = unary_union([f.geometry().asPolygon() for f in layer.getFeatures() if f.geometry().isGeosValid()])
+        from shapely.geometry import shape
+
+        geoms = []
+        for f in layer.getFeatures():
+            qgs_geom = f.geometry()
+            if not qgs_geom.isGeosValid():
+                continue
+            geojson = qgs_geom.asJson()  # Convert QGIS geometry → GeoJSON
+            shp_geom = shape(eval(geojson))  # Convert GeoJSON → Shapely geometry
+            geoms.append(shp_geom)
+
+        if not geoms:
+            QtWidgets.QMessageBox.warning(self, "Error", "No valid polygon geometries found in the layer")
+            return
+
+        self.poly = unary_union(geoms)
+
 
         try:
             r = float(self.rotor_diameter_input.text())/2
@@ -279,17 +306,24 @@ class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Turbine Layout", "", "Shapefiles (*.shp)")
         if not path:
             return
+# Get CRS from construction layer so outputs match
+        layer = self.construction_layer_combo.currentLayer()
+        crs_authid = layer.crs().authid()
+
+        # Save turbine centers as points
         centers = [e.centroid for e in ellipses]
-        gdf_points = gpd.GeoDataFrame(geometry=centers, crs="EPSG:4326")
-        gdf_points.to_file(path)
+        gdf_points = gpd.GeoDataFrame(geometry=centers, crs=crs_authid)
+        gdf_points.to_file(path)  # no buffer(0)
         msg = f"Turbine centers saved to {path}"
 
         # Optionally save ellipses
         if self.export_wakes_chk.isChecked():
             ellipse_path = path.replace(".shp", "_wakes.shp")
-            gdf_ellipses = gpd.GeoDataFrame(geometry=ellipses, crs="EPSG:4326")
+            gdf_ellipses = gpd.GeoDataFrame(geometry=ellipses, crs=crs_authid)
+            gdf_ellipses["geometry"] = gdf_ellipses["geometry"].buffer(0)  # clean
             gdf_ellipses.to_file(ellipse_path)
             msg += f"\nTurbine wakes saved to {ellipse_path}"
+
         QtWidgets.QMessageBox.information(self, "Saved", msg)
 
     def on_plot_wind_rose(self):
