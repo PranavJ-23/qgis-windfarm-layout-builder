@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python/
+env/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# QGIS Plugin
+*.qgs~
+*.qgz~
+*.qgs
+*.qgz
+*.bak
+*.orig
+ui_*.py
+resources.py
+
+# OS generated files
+.DS_Store
+.Trashes
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# Build artifacts
+build/
+dist/
+
+# Logs and databases
+*.log
+*.sqlite
