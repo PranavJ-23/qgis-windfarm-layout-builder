@@ -1,7 +1,0 @@
-{
-    "python.pythonPath": "C:\\Program Files\\QGIS 3.40.8\\apps\\Python312\\python.exe",
-    "python.autoComplete.extraPaths": [
-        "C:\\Program Files\\QGIS 3.40.8\\apps\\qgis\\python",
-        "C:\\Program Files\\QGIS 3.40.8\\apps\\Python312\\Lib"
-    ]
-}
