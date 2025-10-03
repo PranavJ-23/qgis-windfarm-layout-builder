@@ -1,6 +1,15 @@
+import sys
+import os
+
+# This is the path to the directory containing this __init__.py file
+plugin_dir = os.path.dirname(__file__)
+vendor_dir = os.path.join(plugin_dir, 'lib')
+
+if vendor_dir not in sys.path:
+    sys.path.insert(0, vendor_dir)
+
 # -*- coding: utf-8 -*-
-"""
-/***************************************************************************
+"""/***************************************************************************
  WindFarmLayout
                                  A QGIS plugin
  This plugin uses NEWA data to build an optimal layout for an onshore wind farm in areas covered by NEWA
@@ -28,4 +37,3 @@
 def classFactory(iface):
     from .layout_builder import WindFarmLayout
     return WindFarmLayout(iface)
-

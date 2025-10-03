@@ -30,7 +30,15 @@ Thumbs.db
 # Build artifacts
 build/
 dist/
+*.zip
 
 # Logs and databases
 *.log
 *.sqlite
+
+# Development and temporary files
+Call plugin in QGIS.py
+plugin_upload.py
+Ref.py
+README.html
+README.txt

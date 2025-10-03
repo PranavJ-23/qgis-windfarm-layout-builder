@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
-from qgis.PyQt import QtWidgets, QtCore
-from qgis.core import QgsProject, QgsFeature
+from qgis.PyQt import QtWidgets, QtCore, QtGui
+from qgis.core import (
+    QgsProject, QgsFeature, QgsVectorLayer, QgsGeometry, QgsFeatureRequest,
+    QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
+    QgsSpatialIndex, QgsPointXY, QgsFields, QgsField, QgsMarkerSymbol, QgsDiagramRenderer, QgsWkbTypes
+)
+from qgis.PyQt.QtGui import QColor, QImage, QPainter, QPen, QBrush, QFont, QPixmap
+from qgis.PyQt.QtCore import QVariant, QThread, pyqtSignal, QSize, Qt, QPointF
 from ui_wind_farm_dialog import Ui_WFDialog
-import asyncio, random
-import numpy as np
-import pandas as pd
-import xarray as xr
+import math
+import random
+import asyncio
 import httpx
+import xarray as xr
 from io import BytesIO
-from shapely.geometry import Point
-from shapely.affinity import scale, rotate, translate
-from shapely.ops import unary_union
-import rtree
-import geopandas as gpd
-import plotly.express as px
-import plotly.io as pio
-from qgis.PyQt.QtCore import QThread, pyqtSignal
+import numpy as np
 
 # -------------------- Wind Data Functions -------------------- #
 async def fetch_wind_stats(client, lat, lon):
@@ -59,59 +58,161 @@ async def fetch_all_coords_list(coords):
         return results
 
 def dominant_wind_direction(wind_dirs):
-    wind_dirs_rad = np.deg2rad(wind_dirs)
-    sin_sum = np.sin(wind_dirs_rad).mean()
-    cos_sum = np.cos(wind_dirs_rad).mean()
-    angle_rad = np.arctan2(sin_sum, cos_sum)
-    return np.rad2deg(angle_rad) % 360
+    sin_sum = sum(math.sin(math.radians(d)) for d in wind_dirs)/len(wind_dirs)
+    cos_sum = sum(math.cos(math.radians(d)) for d in wind_dirs)/len(wind_dirs)
+    angle_rad = math.atan2(sin_sum, cos_sum)
+    return math.degrees(angle_rad) % 360
 
-def plot_wind_rose(item):
-    wind_speeds = item['time_series_ws']
-    wind_dirs = item['time_series_wd']
-    valid = ~np.isnan(wind_speeds) & ~np.isnan(wind_dirs)
-    wind_speeds = wind_speeds[valid]
-    wind_dirs = wind_dirs[valid]
+def bin_wind_data(wind_speeds, wind_dirs, n_dir_bins=12, speed_bins=[0,2,4,6,8,10,15,25]):
+    dir_bin_width = 360 / n_dir_bins
+    dir_bins = (wind_dirs // dir_bin_width).astype(int)
+    
+    n_speed_bins = len(speed_bins) - 1
+    rose_data = np.zeros((n_dir_bins, n_speed_bins))
+    
+    for i in range(len(wind_speeds)):
+        dir_bin = dir_bins[i]
+        if not (0 <= dir_bin < n_dir_bins):
+            continue
+            
+        speed = wind_speeds[i]
+        speed_bin = -1
+        for j in range(n_speed_bins):
+            if speed_bins[j] < speed <= speed_bins[j+1]:
+                speed_bin = j
+                break
+        
+        if speed_bin != -1:
+            rose_data[dir_bin, speed_bin] += 1
+            
+    total_count = np.sum(rose_data)
+    if total_count > 0:
+        rose_data = (rose_data / total_count) * 100
+        
+    return rose_data
 
-    wind_data = pd.DataFrame({'wind_speed': wind_speeds, 'wind_dir': wind_dirs})
-    wind_data['dir_bin'] = (wind_data['wind_dir'] // 30 * 30).astype(int)
-    speed_bins = [0,2,4,6,8,10,15,25]
-    speed_labels = ["0-2","2-4","4-6","6-8","8-10","10-15","15-25"]
-    wind_data['speed_bin'] = pd.cut(wind_data['wind_speed'], bins=speed_bins, labels=speed_labels)
+def create_wedge_polygon(center, inner_radius, outer_radius, start_angle_deg, end_angle_deg, n_points=10):
+    poly = QtGui.QPolygonF()
+    
+    # Outer arc
+    for i in range(n_points + 1):
+        angle_deg = start_angle_deg + (end_angle_deg - start_angle_deg) * i / n_points
+        angle_rad = math.radians(angle_deg)
+        poly.append(QPointF(center.x() + outer_radius * math.cos(angle_rad), 
+                            center.y() + outer_radius * math.sin(angle_rad)))
+        
+    # Inner arc (in reverse)
+    for i in range(n_points + 1):
+        angle_deg = end_angle_deg - (end_angle_deg - start_angle_deg) * i / n_points
+        angle_rad = math.radians(angle_deg)
+        poly.append(QPointF(center.x() + inner_radius * math.cos(angle_rad), 
+                            center.y() + inner_radius * math.sin(angle_rad)))
+        
+    return poly
 
-    rose_data = wind_data.groupby(['dir_bin','speed_bin']).size().reset_index(name='frequency')
-    total_count = rose_data['frequency'].sum()
-    rose_data['percentage'] = (rose_data['frequency']/total_count)*100
-    rose_data['hover_text'] = rose_data['percentage'].map(lambda x: f"{x:.2f}%")
+def create_wind_rose_image(rose_data, speed_labels, size=600):
+    image = QImage(QSize(size, size), QImage.Format_ARGB32)
+    image.fill(Qt.white)
+    
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing)
+    
+    center = QPointF(size / 2, size / 2)
+    max_radius = size / 2 * 0.8
+    
+    n_dir_bins, n_speed_bins = rose_data.shape
+    dir_bin_width_deg = 360 / n_dir_bins
+    
+    max_percentage_sum = np.max(np.sum(rose_data, axis=1))
+    if max_percentage_sum == 0: max_percentage_sum = 1
 
-    pio.renderers.default = "browser"
-    fig = px.bar_polar(
-        rose_data, r="percentage", theta="dir_bin", color="speed_bin",
-        template="plotly_dark", color_discrete_sequence=px.colors.sequential.Plasma,
-        title="Wind rose", custom_data=["hover_text"]
-    )
-    fig.update_traces(hovertemplate="%{customdata}")
-    fig.show()
+    colors = ['#440154', '#482878', '#3e4989', '#31688e', '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b', '#fde725']
+    
+    for dir_bin in range(n_dir_bins):
+        angle_center_deg = dir_bin * dir_bin_width_deg - 90
+        angle_start_deg = angle_center_deg - dir_bin_width_deg / 2
+        angle_end_deg = angle_center_deg + dir_bin_width_deg / 2
+        
+        current_radius = 0
+        for speed_bin in range(n_speed_bins):
+            percentage = rose_data[dir_bin, speed_bin]
+            if percentage == 0:
+                continue
+            
+            outer_radius = current_radius + (percentage / max_percentage_sum) * max_radius
+            
+            wedge_poly = create_wedge_polygon(center, current_radius, outer_radius, angle_start_deg, angle_end_deg)
+            
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(colors[speed_bin % len(colors)]))
+            painter.drawPolygon(wedge_poly)
+            
+            current_radius = outer_radius
 
-# -------------------- Ellipse Packing -------------------- #
-def create_rotated_ellipse(center_x, center_y, width, height, angle_deg):
-    ellipse = Point(0,0).buffer(1)
-    ellipse = scale(ellipse, width/2, height/2)
-    ellipse = rotate(ellipse, angle_deg, origin=(0,0))
-    ellipse = translate(ellipse, xoff=center_x, yoff=center_y)
-    return ellipse
+    painter.setFont(QFont("Arial", 10))
+    painter.setPen(QColor("black"))
+    legend_x = 10
+    legend_y = 10
+    for i, label in enumerate(speed_labels):
+        painter.setBrush(QColor(colors[i % len(colors)]))
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(legend_x, legend_y, 10, 10)
+        
+        painter.setPen(QColor("black"))
+        painter.drawText(legend_x + 15, legend_y + 10, label)
+        legend_y += 15
+
+    painter.end()
+    return image
+
+class ImageDialog(QtWidgets.QDialog):
+    def __init__(self, image, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Wind Rose")
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        self.label = QtWidgets.QLabel()
+        self.label.setPixmap(QPixmap.fromImage(image))
+        layout.addWidget(self.label)
+        
+        self.save_button = QtWidgets.QPushButton("Save as JPG")
+        self.save_button.clicked.connect(self.save_image)
+        layout.addWidget(self.save_button)
+        
+        self.image = image
+
+    def save_image(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Image", "", "JPEG Image (*.jpg)")
+        if path:
+            self.image.save(path, "JPG", 95)
+
+# -------------------- Ellipse Packing (PyQGIS) -------------------- #
+def create_rotated_ellipse(center_x, center_y, width, height, angle_deg, n_points=36):
+    points = []
+    angle_rad = math.radians(angle_deg)
+    for i in range(n_points):
+        theta = 2*math.pi*i/n_points
+        x = (width/2)*math.cos(theta)
+        y = (height/2)*math.sin(theta)
+        xr = x*math.cos(angle_rad) - y*math.sin(angle_rad)
+        yr = x*math.sin(angle_rad) + y*math.cos(angle_rad)
+        points.append(QgsPointXY(center_x + xr, center_y + yr))
+    points.append(points[0])
+    return QgsGeometry.fromPolygonXY([points])
 
 def generate_hex_grid(poly, spacing):
-    minx, miny, maxx, maxy = poly.bounds
-    dx = spacing*np.sqrt(3)
+    bbox = poly.boundingBox()
+    minx, miny, maxx, maxy = bbox.xMinimum(), bbox.yMinimum(), bbox.xMaximum(), bbox.yMaximum()
+    dx = spacing*math.sqrt(3)
     dy = spacing*1.5
     points=[]
     y = miny
     row = 0
-    while y<maxy:
-        x = minx + (spacing*np.sqrt(3)/2 if row%2 else 0)
-        while x<maxx:
-            pt = Point(x,y)
-            if poly.contains(pt):
+    while y < maxy:
+        x = minx + (spacing*math.sqrt(3)/2 if row%2 else 0)
+        while x < maxx:
+            pt = QgsPointXY(x, y)
+            if poly.contains(QgsGeometry.fromPointXY(pt)):
                 points.append(pt)
             x += dx
         y += dy
@@ -119,57 +220,78 @@ def generate_hex_grid(poly, spacing):
     return points
 
 def get_smart_edge_points(poly, hex_points, edge_dist=5):
-    poly_clean = poly.buffer(0)
-    inner_buffer = poly_clean.buffer(-edge_dist)
-    edge_zone = poly_clean.difference(inner_buffer)
-    return [p for p in hex_points if edge_zone.contains(p)]
+    inner_buffer = poly.buffer(-edge_dist, 5)
+    edge_zone = poly.difference(inner_buffer)
+    return [p for p in hex_points if edge_zone.contains(QgsGeometry.fromPointXY(p))]
 
 def pack_ellipses_from_points(poly, points, width, height, angle_deg):
     ellipses = []
-    idx = rtree.index.Index()
+    idx = QgsSpatialIndex()
     for pt in points:
-        candidate = create_rotated_ellipse(pt.x, pt.y, width, height, angle_deg)
-        cand_bounds = candidate.bounds
-        possible_overlaps = list(idx.intersection(cand_bounds))
-        overlap = any(candidate.intersects(ellipses[j]) for j in possible_overlaps)
+        candidate = create_rotated_ellipse(pt.x(), pt.y(), width, height, angle_deg)
+        
+        possible_overlaps_ids = idx.intersects(candidate.boundingBox())
+        
+        overlap = False
+        for i in possible_overlaps_ids:
+            if candidate.intersects(ellipses[i]):
+                overlap = True
+                break
+        
         if not overlap:
+            feature = QgsFeature()
+            feature.setId(len(ellipses))
+            feature.setGeometry(candidate)
+            idx.insertFeature(feature)
             ellipses.append(candidate)
-            idx.insert(len(ellipses)-1, cand_bounds)
+            
     return ellipses
 
 def multiple_iterations_edge_start_smart(poly, width, height, angle_deg, spacing, n_trials=10, edge_buffer=None, progress_callback=None):
-    poly_union = unary_union(poly)
-    hex_points = generate_hex_grid(poly_union, spacing)
     if edge_buffer is None:
         edge_buffer = spacing
-    edge_points = get_smart_edge_points(poly_union, hex_points, edge_dist=edge_buffer)
+    hex_points = generate_hex_grid(poly, spacing)
     
     best_ellipses = []
     best_count = 0
-    total_points = len(hex_points) * n_trials  # total number of points across all trials
-    points_processed = 0
 
-    for i in range(n_trials):
-        start_point = random.choice(edge_points)
-        start_idx = hex_points.index(start_point)
-        trial_points = hex_points[start_idx:] + hex_points[:start_idx]
-        ellipses = pack_ellipses_from_points(poly_union, trial_points, width, height, angle_deg)
-        
-        # Update best
-        if len(ellipses) > best_count:
-            best_count = len(ellipses)
-            best_ellipses = ellipses
-        
-        # Update points processed
-        points_processed += len(trial_points)
-        if progress_callback:
-            progress_callback.emit(int(points_processed / total_points * 100))
-            
-    # Ensure 100% at the end
+    strategies = ['random', 'bottom_up', 'top_down', 'left_right', 'right_left']
+    
+    num_trials_per_strategy = n_trials // len(strategies)
+    if num_trials_per_strategy == 0:
+        num_trials_per_strategy = 1
+
+    total_trials = num_trials_per_strategy * len(strategies)
+    completed_trials = 0
+
+    for strategy in strategies:
+        for i in range(num_trials_per_strategy):
+            if strategy == 'random':
+                random.shuffle(hex_points)
+                trial_points = hex_points
+            elif strategy == 'bottom_up':
+                trial_points = sorted(hex_points, key=lambda p: p.y())
+            elif strategy == 'top_down':
+                trial_points = sorted(hex_points, key=lambda p: p.y(), reverse=True)
+            elif strategy == 'left_right':
+                trial_points = sorted(hex_points, key=lambda p: p.x())
+            elif strategy == 'right_left':
+                trial_points = sorted(hex_points, key=lambda p: p.x(), reverse=True)
+
+            ellipses = pack_ellipses_from_points(poly, trial_points, width, height, angle_deg)
+            if len(ellipses) > best_count:
+                best_count = len(ellipses)
+                best_ellipses = ellipses
+
+            completed_trials += 1
+            if progress_callback:
+                progress_callback.emit(int(completed_trials / total_trials * 100))
+
     if progress_callback:
         progress_callback.emit(100)
+        
+    print(f"Generated {len(best_ellipses)} ellipses")
     return best_ellipses
-
 
 # -------------------- Worker Thread -------------------- #
 class PackEllipseThread(QThread):
@@ -184,11 +306,9 @@ class PackEllipseThread(QThread):
         self.spacing = spacing
         self.n_trials = n_trials
     def run(self):
-        ellipses = multiple_iterations_edge_start_smart(
-            self.poly, self.width, self.height, self.angle_deg,
-            spacing=self.spacing, n_trials=self.n_trials,
-            progress_callback=self.progress_signal
-        )
+        ellipses = multiple_iterations_edge_start_smart(self.poly, self.width, self.height, self.angle_deg,
+                                                        spacing=self.spacing, n_trials=self.n_trials,
+                                                        progress_callback=self.progress_signal)
         self.finished_signal.emit(ellipses)
 
 # -------------------- Plugin Dialog -------------------- #
@@ -198,101 +318,63 @@ class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
         self.iface = iface
         self.setupUi(self)
         self.results=[]
-        self.main_dir=None
+        self.main_dir=0
         self.poly=None
         self.coords=[]
-
-        # Connect buttons
         self.init_wind_btn.clicked.connect(self.on_init_wind_data)
         self.genrate_layout_btn.clicked.connect(self.on_generate_layout)
         self.plot_wind_btn.clicked.connect(self.on_plot_wind_rose)
 
     def on_init_wind_data(self):
-        # Fetch coordinates
         if self.use_point_layer_chk.isChecked():
             layer = self.coord_layer_combo.currentLayer()
             if not layer:
                 QtWidgets.QMessageBox.warning(self, "No Layer", "Please select a point layer")
                 return
-
-            from qgis.core import QgsCoordinateTransform, QgsProject, QgsCoordinateReferenceSystem
-
-            # Transform layer CRS to WGS84
             crs_src = layer.crs()
-            crs_dest = QgsCoordinateReferenceSystem("EPSG:4326")  # WGS84
+            crs_dest = QgsCoordinateReferenceSystem("EPSG:4326")
             transform = QgsCoordinateTransform(crs_src, crs_dest, QgsProject.instance().transformContext())
-
-            # Only a single feature expected
             feature = next(layer.getFeatures(), None)
-            if not feature:
-                QtWidgets.QMessageBox.warning(self, "No Feature", "Layer has no features")
-                return
-
-            geom = feature.geometry()
-            if geom.isEmpty():
-                QtWidgets.QMessageBox.warning(self, "No Geometry", "Point geometry is empty")
-                return
-
-            pt = geom.asPoint()
+            pt = feature.geometry().asPoint()
             pt_wgs84 = transform.transform(pt)
-
-            # Store as (latitude, longitude)
             self.coords = [(pt_wgs84.y(), pt_wgs84.x())]
-
         else:
-            # Manual lat/lon input (unchanged)
             lat_text = self.lat_input.text()
             lon_text = self.lon_input.text()
             if not lat_text or not lon_text:
                 QtWidgets.QMessageBox.warning(self, "No Input", "Enter lat/lon or select point layer")
                 return
             self.coords = [(float(lat_text), float(lon_text))]
-
-        # --- Fetch wind data synchronously for now ---
+        
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self.results = loop.run_until_complete(fetch_all_coords_list(self.coords))
+
         if "error" in self.results[0]:
-            QtWidgets.QMessageBox.critical(self, "Error", self.results[0]["error"])
+            QtWidgets.QMessageBox.warning(self, "API Error", f"Could not fetch wind data: {self.results[0]['error']}. Using default wind direction of {self.main_dir} degrees.")
             return
+        
         self.main_dir = dominant_wind_direction(self.results[0]['time_series_wd'])
         QtWidgets.QMessageBox.information(self, "Finished", "Wind data obtained and dominant wind direction calculated.")
 
     def on_generate_layout(self):
-        # Load polygon
         layer = self.construction_layer_combo.currentLayer()
         if not layer:
             QtWidgets.QMessageBox.warning(self, "No Layer", "Please select a polygon layer")
             return
-        from shapely.geometry import shape
-
-        geoms = []
-        for f in layer.getFeatures():
-            qgs_geom = f.geometry()
-            if not qgs_geom.isGeosValid():
-                continue
-            geojson = qgs_geom.asJson()  # Convert QGIS geometry → GeoJSON
-            shp_geom = shape(eval(geojson))  # Convert GeoJSON → Shapely geometry
-            geoms.append(shp_geom)
-
-        if not geoms:
-            QtWidgets.QMessageBox.warning(self, "Error", "No valid polygon geometries found in the layer")
-            return
-
-        self.poly = unary_union(geoms)
-
-
+        features = [f for f in layer.getFeatures() if f.geometry() and f.geometry().isGeosValid()]
+        geom_union = QgsGeometry.unaryUnion([f.geometry() for f in features])
+        self.poly = geom_union
         try:
-            r = float(self.rotor_diameter_input.text())/2
-        except:
-            QtWidgets.QMessageBox.warning(self, "Error", "Invalid rotor diameter")
+            r = float(self.rotor_diameter_input.text()) / 2
+            spacing_text = self.grid_spacing_input.text()
+            spacing = float(spacing_text) if spacing_text else 10.0
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "Error", "Invalid numeric input.")
             return
-        spacing = float(self.grid_spacing_input.text() or 10)
         width = r*4
         height = r*3
         n_trials = self.itterations_slider.value()
-
-        # Start ellipse packing in background thread
         self.thread = PackEllipseThread(self.poly, width, height, self.main_dir, spacing, n_trials)
         self.thread.progress_signal.connect(self.progress_bar.setValue)
         self.thread.finished_signal.connect(self.on_layout_finished)
@@ -302,26 +384,41 @@ class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
         if not ellipses:
             QtWidgets.QMessageBox.warning(self, "Layout Failed", "No valid layout generated")
             return
-        # Save turbine centers
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Turbine Layout", "", "Shapefiles (*.shp)")
         if not path:
             return
-# Get CRS from construction layer so outputs match
         layer = self.construction_layer_combo.currentLayer()
-        crs_authid = layer.crs().authid()
-
-        # Save turbine centers as points
-        centers = [e.centroid for e in ellipses]
-        gdf_points = gpd.GeoDataFrame(geometry=centers, crs=crs_authid)
-        gdf_points.to_file(path)  # no buffer(0)
+        crs = layer.crs()
+        fields = QgsFields()
+        fields.append(QgsField("id", QVariant.Int))
+        
+        writer = QgsVectorFileWriter(path, "UTF-8", fields, QgsWkbTypes.Point, crs, "ESRI Shapefile")
+        if writer.hasError() != QgsVectorFileWriter.NoError:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Cannot write to {path}: {writer.errorMessage()}")
+            return
+            
+        for i, ellipse in enumerate(ellipses):
+            feat = QgsFeature()
+            feat.setGeometry(ellipse.centroid())
+            feat.setAttributes([i])
+            writer.addFeature(feat)
+        del writer
+        
         msg = f"Turbine centers saved to {path}"
 
-        # Optionally save ellipses
         if self.export_wakes_chk.isChecked():
             ellipse_path = path.replace(".shp", "_wakes.shp")
-            gdf_ellipses = gpd.GeoDataFrame(geometry=ellipses, crs=crs_authid)
-            gdf_ellipses["geometry"] = gdf_ellipses["geometry"].buffer(0)  # clean
-            gdf_ellipses.to_file(ellipse_path)
+            writer = QgsVectorFileWriter(ellipse_path, "UTF-8", fields, QgsWkbTypes.Polygon, crs, "ESRI Shapefile")
+            if writer.hasError() != QgsVectorFileWriter.NoError:
+                QtWidgets.QMessageBox.critical(self, "Error", f"Cannot write to {ellipse_path}: {writer.errorMessage()}")
+                return
+                
+            for i, ellipse in enumerate(ellipses):
+                feat = QgsFeature()
+                feat.setGeometry(ellipse)
+                feat.setAttributes([i])
+                writer.addFeature(feat)
+            del writer
             msg += f"\nTurbine wakes saved to {ellipse_path}"
 
         QtWidgets.QMessageBox.information(self, "Saved", msg)
@@ -330,4 +427,20 @@ class WindFarmDialog(QtWidgets.QDialog, Ui_WFDialog):
         if not self.results:
             QtWidgets.QMessageBox.warning(self, "No Data", "Please fetch wind data first")
             return
-        plot_wind_rose(self.results[0])
+            
+        wind_speeds = self.results[0]['time_series_ws']
+        wind_dirs = self.results[0]['time_series_wd']
+        valid = ~np.isnan(wind_speeds) & ~np.isnan(wind_dirs)
+        wind_speeds = wind_speeds[valid]
+        wind_dirs = wind_dirs[valid]
+
+        n_dir_bins = 12
+        speed_bins = [0, 2, 4, 6, 8, 10, 15, 25]
+        speed_labels = ["0-2", "2-4", "4-6", "6-8", "8-10", "10-15", "15-25"]
+        
+        rose_data = bin_wind_data(wind_speeds, wind_dirs, n_dir_bins, speed_bins)
+        
+        image = create_wind_rose_image(rose_data, speed_labels)
+        
+        self.image_dialog = ImageDialog(image, self)
+        self.image_dialog.show()
