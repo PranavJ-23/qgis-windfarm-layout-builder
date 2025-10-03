@@ -34,10 +34,11 @@ All Python dependencies are included in the plugin package.
 
 1.  Click on the plugin icon in the toolbar or find it in the **Vector > Layout Builder for Onshore Windfarms** menu.
 2.  **Fetch Wind Data:**
-    *   Enter the latitude and longitude for your area of interest, or select a point layer from your project.
+    *   Enter the latitude and longitude for your area of interest, or select a point layer with a **Single Point** from your project.
     *   Click **Initialize Wind Data**.
 3.  **Generate Layout:**
-    *   Select a polygon layer that defines the construction area.
+    *   Select a polygon layer that defines the construction area. Polygon layer can have
+        multiple polygons as long as they are not overlapping.
     *   Set the turbine rotor diameter, grid spacing, and number of iterations for the packing algorithm.
     *   Click **Generate Layout**. The process will run in the background.
 4.  **Save Results:** Once the layout is generated, you will be prompted to save the turbine locations as a shapefile. You can also choose to export the wake ellipses.

@@ -6,11 +6,12 @@
 name=Layout Builder for Onshore Windfarms
 qgisMinimumVersion=3.0
 description=This plugin uses NEWA data to build an optimal layout for an onshore wind farm in areas covered by NEWA
-version=0.1
+version=1.0
 author=Pranav Joshi
 email=pranavjoshi232@gmail.com
 
-about=Work in progress!
+about=Version 1.0: This plugin can be used to build an onshore wind farm layout within QGIS for early stage wind development. Features include calculating optimal wind direction from 
+historical NEWA wind data for given coordinates, visualising wind speeds as a wind rose and constructing an optimal layout.
 
 tracker=https://github.com/PranavJ-23/qgis-windfarm-layout-builder/issues
 repository=https://github.com/PranavJ-23/qgis-windfarm-layout-builder
