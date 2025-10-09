@@ -7,7 +7,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtGui import QColor, QImage, QPainter, QPen, QBrush, QFont, QPixmap
 from qgis.PyQt.QtCore import QVariant, QThread, pyqtSignal, QSize, Qt, QPointF
-from ui_wind_farm_dialog import Ui_WFDialog
+from .ui_wind_farm_dialog import Ui_WFDialog
 import math
 import random
 import asyncio

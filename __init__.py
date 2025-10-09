@@ -1,12 +1,3 @@
-import sys
-import os
-
-# This is the path to the directory containing this __init__.py file
-plugin_dir = os.path.dirname(__file__)
-vendor_dir = os.path.join(plugin_dir, 'lib')
-
-if vendor_dir not in sys.path:
-    sys.path.insert(0, vendor_dir)
 
 # -*- coding: utf-8 -*-
 """/***************************************************************************
@@ -18,8 +9,7 @@ if vendor_dir not in sys.path:
         begin                : 2025-08-21
         copyright            : (C) 2025 by Pranav Joshi
         email                : pranavjoshi232@gmail.com
-        git sha              : $Format:%H$
- ***************************************************************************/
+ ****************************************************************************/
 
 /***************************************************************************
  *                                                                         *
@@ -29,11 +19,92 @@ if vendor_dir not in sys.path:
  *   (at your option) any later version.                                   *
  *                                                                         *
  ***************************************************************************/
- This script initializes the plugin, making it known to QGIS.
 """
 
+import sys
+import subprocess
+import importlib.util
+from qgis.PyQt.QtWidgets import QMessageBox
 
-# noinspection PyPep8Naming
+# --- DEPENDENCY CHECKER ---
+# List of required packages
+REQUIRED_PACKAGES = ['pandas', 'xarray', 'httpx']
+
+def check_dependencies():
+    """Checks if all required packages are installed."""
+    missing_packages = []
+    for package_name in REQUIRED_PACKAGES:
+        spec = importlib.util.find_spec(package_name)
+        if spec is None:
+            missing_packages.append(package_name)
+    return missing_packages
+
+def install_dependencies(packages):
+    """Tries to install a list of packages using pip."""
+    try:
+        # Ensure pip is available
+        subprocess.check_call([sys.executable, '-m', 'ensurepip'])
+        # Update pip to the latest version
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
+        # Install packages
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + packages)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error installing packages: {e}")
+        return False
+
+class MessagePlugin:
+    """A dummy plugin class to show messages to the user."""
+    def __init__(self, iface, title, message):
+        self.iface = iface
+        QMessageBox.information(self.iface.mainWindow(), title, message)
+
+    def initGui(self):
+        pass
+
+    def unload(self):
+        pass
+
+# --- PLUGIN ENTRY POINT ---
 def classFactory(iface):
-    from .layout_builder import WindFarmLayout
-    return WindFarmLayout(iface)
+    """Load the plugin."""
+    missing = check_dependencies()
+    if not missing:
+        # All dependencies are met, load the main plugin
+        from .layout_builder import WindFarmLayout
+        return WindFarmLayout(iface)
+    else:
+        # Dependencies are missing, show installer message
+        package_list = ", ".join(missing)
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle("Plugin Dependencies Required")
+        msg_box.setText(
+            f"""This plugin requires the following Python libraries to be installed:<br><br>
+            <b>{package_list}</b><br><br>
+            Do you want to install them now? QGIS may be unresponsive for a few minutes."""
+        )
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.Yes)
+        
+        ret = msg_box.exec_()
+        
+        if ret == QMessageBox.Yes:
+            if install_dependencies(missing):
+                return MessagePlugin(
+                    iface, 
+                    "Installation Successful", 
+                    "Libraries installed successfully. Please restart QGIS to enable the plugin."
+                )
+            else:
+                return MessagePlugin(
+                    iface, 
+                    "Installation Failed", 
+                    f"Could not automatically install the required libraries. Please see the QGIS log for details."
+                )
+        else:
+            return MessagePlugin(
+                iface, 
+                "Dependencies Missing", 
+                f"The plugin cannot start because the following libraries are missing: {package_list}"
+            )
