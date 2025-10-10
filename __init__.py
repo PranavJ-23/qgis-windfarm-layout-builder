@@ -24,7 +24,9 @@
 import sys
 import subprocess
 import importlib.util
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox, QProgressDialog
+from qgis.PyQt.QtCore import QObject, QThread, pyqtSignal
+
 
 # --- DEPENDENCY CHECKER ---
 # List of required packages
@@ -39,72 +41,90 @@ def check_dependencies():
             missing_packages.append(package_name)
     return missing_packages
 
-def install_dependencies(packages):
-    """Tries to install a list of packages using pip."""
-    try:
-        # Ensure pip is available
-        subprocess.check_call([sys.executable, '-m', 'ensurepip'])
-        # Update pip to the latest version
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
-        # Install packages
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + packages)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error installing packages: {e}")
-        return False
+class InstallerWorker(QObject):
+    finished = pyqtSignal(bool, str)
 
-class MessagePlugin:
-    """A dummy plugin class to show messages to the user."""
-    def __init__(self, iface, title, message):
+    def __init__(self, packages_to_install):
+        super().__init__()
+        self.packages = packages_to_install
+
+    def run(self):
+        try:
+            subprocess.check_call([sys.executable, '-m', 'ensurepip'])
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + self.packages)
+            self.finished.emit(True, "Libraries installed successfully. Please restart QGIS to enable the plugin.")
+        except subprocess.CalledProcessError as e:
+            error_message = f"Error installing packages: {e}"
+            print(error_message)
+            self.finished.emit(False, f"Could not automatically install the required libraries. See QGIS log for details: {error_message}")
+
+class InstallerPlugin:
+    def __init__(self, iface, missing_packages):
         self.iface = iface
-        QMessageBox.information(self.iface.mainWindow(), title, message)
+        self.missing = missing_packages
+        self.thread = None
+        self.worker = None
+        self.progress_dialog = None
 
     def initGui(self):
-        pass
-
-    def unload(self):
-        pass
-
-# --- PLUGIN ENTRY POINT ---
-def classFactory(iface):
-    """Load the plugin."""
-    missing = check_dependencies()
-    if not missing:
-        # All dependencies are met, load the main plugin
-        from .layout_builder import WindFarmLayout
-        return WindFarmLayout(iface)
-    else:
-        # Dependencies are missing, show installer message
-        package_list = ", ".join(missing)
+        package_list = ", ".join(self.missing)
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Information)
         msg_box.setWindowTitle("Plugin Dependencies Required")
         msg_box.setText(
             f"""This plugin requires the following Python libraries to be installed:<br><br>
             <b>{package_list}</b><br><br>
-            Do you want to install them now? QGIS may be unresponsive for a few minutes."""
+            Do you want to install them now? This will happen in the background."""
         )
         msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg_box.setDefaultButton(QMessageBox.Yes)
-        
+
         ret = msg_box.exec_()
-        
+
         if ret == QMessageBox.Yes:
-            if install_dependencies(missing):
-                return MessagePlugin(
-                    iface, 
-                    "Installation Successful", 
-                    "Libraries installed successfully. Please restart QGIS to enable the plugin."
-                )
-            else:
-                return MessagePlugin(
-                    iface, 
-                    "Installation Failed", 
-                    f"Could not automatically install the required libraries. Please see the QGIS log for details."
-                )
+            self.run_installation()
         else:
-            return MessagePlugin(
-                iface, 
-                "Dependencies Missing", 
-                f"The plugin cannot start because the following libraries are missing: {package_list}"
-            )
+            QMessageBox.warning(self.iface.mainWindow(), "Dependencies Missing", f"The plugin cannot start because the following libraries are missing: {package_list}")
+
+    def run_installation(self):
+        self.progress_dialog = QProgressDialog(self.iface.mainWindow())
+        self.progress_dialog.setLabelText("Installing required libraries...\nThis may take a few minutes.")
+        self.progress_dialog.setCancelButton(None)
+        self.progress_dialog.setRange(0, 0) # Indeterminate progress bar
+        self.progress_dialog.show()
+
+        self.thread = QThread()
+        self.worker = InstallerWorker(self.missing)
+        self.worker.moveToThread(self.thread)
+        self.worker.finished.connect(self.on_installation_finished)
+        self.thread.started.connect(self.worker.run)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+
+    def on_installation_finished(self, success, message):
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        
+        self.thread.quit()
+        self.thread.wait()
+
+        if success:
+            QMessageBox.information(self.iface.mainWindow(), "Installation Successful", message)
+        else:
+            QMessageBox.critical(self.iface.mainWindow(), "Installation Failed", message)
+
+    def unload(self):
+        if self.thread and self.thread.isRunning():
+            self.thread.quit()
+            self.thread.wait()
+
+# --- PLUGIN ENTRY POINT ---
+def classFactory(iface):
+    """Load the plugin."""
+    missing = check_dependencies()
+    if not missing:
+        from .layout_builder import WindFarmLayout
+        return WindFarmLayout(iface)
+    else:
+        return InstallerPlugin(iface, missing)
