@@ -22,6 +22,7 @@
 """
 
 import sys
+import os
 import subprocess
 import importlib.util
 from qgis.PyQt.QtWidgets import QMessageBox, QProgressDialog
@@ -31,6 +32,19 @@ from qgis.PyQt.QtCore import QObject, QThread, pyqtSignal
 # --- DEPENDENCY CHECKER ---
 # List of required packages
 REQUIRED_PACKAGES = ['pandas', 'xarray', 'httpx']
+
+def _get_python_executable():
+    """
+    Get the path to the python executable.
+    This is a workaround for the case where sys.executable points to the QGIS executable.
+    """
+    if sys.platform == 'win32':
+        # This is the most reliable way to get the python executable in QGIS on Windows
+        py_exe = os.path.join(sys.prefix, 'python.exe')
+        if os.path.exists(py_exe):
+            return py_exe
+    return sys.executable
+
 
 def check_dependencies():
     """Checks if all required packages are installed."""
@@ -49,15 +63,32 @@ class InstallerWorker(QObject):
         self.packages = packages_to_install
 
     def run(self):
+        """
+        Installs the required packages using pip.
+        It uses subprocess.run with capture_output=True to avoid opening a console window.
+        """
         try:
-            subprocess.check_call([sys.executable, '-m', 'ensurepip'])
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + self.packages)
+            executable = _get_python_executable()
+            
+            # Upgrade pip
+            subprocess.run(
+                [executable, "-m", "pip", "install", "--upgrade", "pip"],
+                capture_output=True, text=True, check=True
+            )
+            # Install packages
+            subprocess.run(
+                [executable, "-m", "pip", "install"] + self.packages,
+                capture_output=True, text=True, check=True
+            )
             self.finished.emit(True, "Libraries installed successfully. Please restart QGIS to enable the plugin.")
         except subprocess.CalledProcessError as e:
-            error_message = f"Error installing packages: {e}"
+            error_message = f"Error installing packages: {e.stderr}"
             print(error_message)
             self.finished.emit(False, f"Could not automatically install the required libraries. See QGIS log for details: {error_message}")
+        except FileNotFoundError:
+            error_message = "Could not find the python executable. Please install the dependencies manually."
+            print(error_message)
+            self.finished.emit(False, error_message)
 
 class InstallerPlugin:
     def __init__(self, iface, missing_packages):
